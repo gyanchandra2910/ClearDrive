@@ -52,3 +52,5 @@ Thumbs.db
 *.avi
 *.mkv
 *.webm
+
+.tex
