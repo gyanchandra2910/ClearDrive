@@ -3,30 +3,30 @@ import numpy as np
 
 def generate_visibility_map(t_map):
     """
-    Stage 3: Transmission map (t) ko ek Red/Yellow/Green HUD mein convert karna.
-    t_map: 0.0 se 1.0 ke beech ki values wala 2D array.
+    Stage 3: Convert physical transmission constraints (t) into a color-coded visual HUD.
+    t_map is an abstract float matrix evaluating localized environmental density.
     """
     h, w = t_map.shape
-    # Ek blank black image (canvas) banao
+    # Instantiate blank canvas array for HUD assembly
     overlay = np.zeros((h, w, 3), dtype=np.uint8)
 
     # Mathematical Logic for Zones:
-    # 1. Safe Zone (Green): Jahan t >= 0.65 hai
-    overlay[t_map >= 0.65] = [0, 255, 0]  # BGR format mein Green
+    # 1. Safe Zone (Green): Clear visibility where transmission bounds t >= 0.65
+    overlay[t_map >= 0.65] = [0, 255, 0]  # Standard OpenCV BGR mappings
 
-    # 2. Caution Zone (Yellow): Jahan t 0.35 aur 0.65 ke beech hai
-    overlay[(t_map >= 0.35) & (t_map < 0.65)] = [0, 255, 255]  # BGR format mein Yellow
+    # 2. Caution Zone (Yellow): Partial density interference where t is bounded below 0.65
+    overlay[(t_map >= 0.35) & (t_map < 0.65)] = [0, 255, 255]
 
-    # 3. Danger Zone (Red): Jahan t < 0.35 hai (Heavy fog)
-    overlay[t_map < 0.35] = [0, 0, 255]  # BGR format mein Red
+    # 3. Danger Zone (Red): Extreme density, structural occlusion (t < 0.35)
+    overlay[t_map < 0.35] = [0, 0, 255]
 
-    # Map ko soft aur natural banane ke liye heavy blur laga rahe hain
+    # Apply aggressive Gaussian blur to emulate graphical color gradients across vector bounds
     overlay_smoothed = cv2.GaussianBlur(overlay, (51, 51), 0)
     
     return overlay_smoothed
 
 def apply_hud(original_img, visibility_map, alpha=0.3):
     """
-    HUD ko original image par transparent glass ki tarah chipkana.
+    Synthesize GUI overlays directly onto the primary optical feed seamlessly.
     """
     return cv2.addWeighted(original_img, 1 - alpha, visibility_map, alpha, 0)

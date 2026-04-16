@@ -72,6 +72,138 @@ function ModeTabs({ activeMode, onChange, disabled }) {
   )
 }
 
+// ─── Client Webcam Streamer ──────────────────────────────────────────────────
+function ClientWebcamStreamer({ apiUrl, onStreamStop }) {
+  const videoRef = useRef(null)
+  const [stream, setStream] = useState(null)
+  const [processedImg, setProcessedImg] = useState(null)
+  const [isProcessing, setIsProcessing] = useState(false)
+  const [cameraError, setCameraError] = useState(null)
+
+  // Explicit Start Camera function
+  const startCamera = async () => {
+    setCameraError(null)
+    try {
+      const s = await navigator.mediaDevices.getUserMedia({ video: true })
+      setStream(s)
+      if (videoRef.current) {
+        videoRef.current.srcObject = s
+      }
+    } catch (e) {
+      console.error(e)
+      setCameraError('Camera access denied or device not found.')
+    }
+  }
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (stream) {
+        stream.getTracks().forEach(t => t.stop())
+      }
+    }
+  }, [stream])
+
+  const captureFrameAndSend = async () => {
+    if (!videoRef.current || !stream || isProcessing) return;
+    setIsProcessing(true);
+    
+    // Create a canvas to capture the frame
+    const canvas = document.createElement('canvas');
+    canvas.width = videoRef.current.videoWidth || 640;
+    canvas.height = videoRef.current.videoHeight || 480;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
+    
+    canvas.toBlob(async (blob) => {
+      if (!blob) { setIsProcessing(false); return; }
+      
+      const formData = new FormData();
+      formData.append('file', blob, 'frame.jpg');
+      
+      try {
+        const res = await fetch(`${apiUrl}/process-frame`, { 
+          method: 'POST', 
+          body: formData 
+        });
+        
+        if (res.ok) {
+          const processedBlob = await res.blob();
+          setProcessedImg(URL.createObjectURL(processedBlob));
+        } else {
+          // Silent fail on continuous to avoid flashing errors
+        }
+      } catch (e) {
+        console.error(e);
+        // Silent fail on continuous loop
+      } finally {
+        setIsProcessing(false);
+      }
+    }, 'image/jpeg', 0.85); // slightly lower quality for faster stream
+  };
+
+  // Continuous Auto-Stream
+  const [autoStream, setAutoStream] = useState(false);
+  useEffect(() => {
+    let interval;
+    if (autoStream && stream) {
+      interval = setInterval(() => {
+        captureFrameAndSend();
+      }, 1500); // Process a frame every 1.5 seconds. (Real-time AI over HTTP)
+    }
+    return () => clearInterval(interval);
+  }, [autoStream, stream, isProcessing]);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', width: '100%', height: '100%', alignItems: 'center', padding: '10px' }}>
+      
+      {cameraError && <div className="upload-error" style={{ marginBottom: '10px' }}>⚠️ {cameraError}</div>}
+
+      <div style={{ display: 'flex', gap: '15px', width: '100%', height: 'calc(100% - 60px)' }}>
+        {/* Local Video Stream */}
+        <div style={{ flex: 1, position: 'relative', border: '1px solid var(--border-dim)', borderRadius: '8px', overflow: 'hidden', backgroundColor: '#000' }}>
+           <video ref={videoRef} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
+           <div style={{ position: 'absolute', top: 10, left: 10, background: 'rgba(0,0,0,0.6)', padding: '4px 8px', borderRadius: '4px', fontSize: '12px' }}>
+             📷 LIVE CAMERA
+           </div>
+        </div>
+
+        {/* Processed Frame */}
+        <div style={{ flex: 1, position: 'relative', border: '1px solid var(--border-dim)', borderRadius: '8px', overflow: 'hidden', backgroundColor: '#000' }}>
+           {processedImg ? (
+             <img src={processedImg} alt="AI Enhanced" style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
+           ) : (
+             <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', opacity: 0.5, fontSize: '14px' }}>
+               Capture a frame to see AI results here
+             </div>
+           )}
+           <div style={{ position: 'absolute', top: 10, left: 10, background: 'rgba(0,0,0,0.6)', padding: '4px 8px', borderRadius: '4px', fontSize: '12px', color: '#00ff88' }}>
+             🧠 AI ENHANCED
+           </div>
+        </div>
+      </div>
+
+      <div style={{ height: '60px', display: 'flex', alignItems: 'center', gap: '15px' }}>
+         {!stream ? (
+           <button className="btn-connect" style={{ backgroundColor: '#a855f7' }} onClick={startCamera}>
+              ▶ Start Camera Permissions
+           </button>
+         ) : (
+           <>
+             <button 
+               className="btn-connect" 
+               style={{ backgroundColor: autoStream ? '#ff4081' : '#00ff88', color: '#000' }} 
+               onClick={() => setAutoStream(!autoStream)}
+             >
+                {autoStream ? '⏹ Stop Live AI Feed' : '▶ Start Live Continuous AI Feed'}
+             </button>
+           </>
+         )}
+      </div>
+    </div>
+  )
+}
+
 // ─── Main App ─────────────────────────────────────────────────────────────────
 export default function App() {
   const [inputMode, setInputMode] = useState('dashcam')   // dashcam | webcam | upload
@@ -157,7 +289,7 @@ export default function App() {
       setIsStreaming(true)
 
     } else if (inputMode === 'webcam') {
-      setImgSrc(`${API_URL}/webcam_feed?t=${Date.now()}`)
+      // Client-side stream handling inside the render block
       setIsStreaming(true)
 
     } else if (inputMode === 'upload') {
@@ -279,15 +411,17 @@ export default function App() {
                 {/* Webcam notice */}
                 {inputMode === 'webcam' && (
                   <div className="webcam-notice">
-                    🎥 The AI server will open camera index 0 on the machine running the backend.
-                    Click <strong>Connect Stream</strong> to begin live processing.
+                    🎥 Device Camera logic implemented. Securely asks for device permissions.
+                    Click <strong>Connect Stream</strong> to start the interactive capture.
                   </div>
                 )}
               </div>
             )}
 
             <div className="video-wrapper">
-              {isStreaming && imgSrc ? (
+              {isStreaming && inputMode === 'webcam' ? (
+                <ClientWebcamStreamer apiUrl={API_URL} onStreamStop={stopStream} />
+              ) : isStreaming && imgSrc ? (
                 <>
                   <img
                     src={imgSrc}

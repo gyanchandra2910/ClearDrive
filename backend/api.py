@@ -210,19 +210,105 @@ def video_feed():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ENDPOINT 2: Live Webcam feed (opens camera index 0)
+# ENDPOINT 2: Process Single Frame (For WebRTC / Client-side Webcam)
 # ─────────────────────────────────────────────────────────────────────────────
-@app.get("/webcam_feed")
-def webcam_feed():
-    cap = cv2.VideoCapture(0)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-    if not cap.isOpened():
-        return {"error": "No webcam found on this server."}
-    return StreamingResponse(
-        process_and_stream(cap, loop=False),
-        media_type="multipart/x-mixed-replace; boundary=frame"
-    )
+from fastapi.responses import Response
+
+@app.post("/process-frame")
+async def process_frame(file: UploadFile = File(...)):
+    contents = await file.read()
+    nparr = np.frombuffer(contents, np.uint8)
+    frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    
+    if frame is None:
+        return {"error": "Invalid image data"}
+        
+    start_time = time.time()
+    proc_w, proc_h = 640, 480
+    frame = cv2.resize(frame, (proc_w, proc_h))
+
+    # Stage 1: AI Weather
+    raw_mode = brain.predict(frame)
+    weather_mode = raw_mode
+    avg_brightness = np.mean(frame)
+    if avg_brightness < 45: 
+        weather_mode = "NIGHT"
+
+    if weather_mode == "NIGHT":
+        status_mode = "AI MODE: NIGHT"
+        processed_img = enhance_low_light(frame)
+        t_visual = np.ones((proc_h, proc_w)) * 0.7
+    elif weather_mode == "FOGGY":
+        status_mode = "AI MODE: FOGGY"
+        img_float = frame.astype('float64')
+        dark = get_dark_channel(img_float)
+        current_A = get_atmospheric_light(img_float, dark)
+        t = get_transmission(img_float, current_A, window_size=7, omega=0.97)
+        t_smoothed = cv2.GaussianBlur(t, (3, 3), 0)
+        dehazed = recover_image(img_float, t_smoothed, current_A, t0=0.05)
+        
+        lab = cv2.cvtColor(dehazed, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+        l_enhanced = clahe.apply(l)
+        lab_enhanced = cv2.merge((l_enhanced, a, b))
+        processed_img = cv2.cvtColor(lab_enhanced, cv2.COLOR_LAB2BGR)
+        t_visual = t_smoothed
+    else:
+        status_mode = "AI MODE: CLEAR"
+        processed_img = frame.copy()
+        t_visual = np.ones((proc_h, proc_w))
+
+    # Stage 2: Road Segmentation
+    road_mask = segmentor.get_road_mask(processed_img)
+
+    # Stage 3: Lane Detection
+    canny_img = canny_edge_detection(processed_img)
+    roi_img = region_of_interest(canny_img)
+    lines = cv2.HoughLinesP(roi_img, 2, np.pi/180, 100, np.array([]), minLineLength=40, maxLineGap=5)
+    lane_assist_output = cv2.addWeighted(processed_img, 0.7, road_mask, 0.3, 0)
+    if lines is not None:
+        line_layer = display_lines(processed_img, lines)
+        lane_assist_output = cv2.addWeighted(lane_assist_output, 1, line_layer, 1, 0)
+
+    # Stage 4: HUD & Stats
+    vis_map = generate_visibility_map(t_visual)
+    hud_final = apply_hud(processed_img, vis_map, alpha=0.35)
+    c_gain, v_score = get_performance_metrics(frame, processed_img, t_visual)
+    active_alerts = get_alerts(v_score, lines)
+    fps = 1.0 / max((time.time() - start_time), 0.001)
+
+    system_status["fps"] = round(fps, 1)
+    system_status["visibility"] = round(v_score, 1)
+    system_status["contrast"] = round(c_gain, 1)
+    system_status["weather"] = weather_mode
+
+    grid_w, grid_h = 540, 380
+    s1 = cv2.resize(frame, (grid_w, grid_h))
+    s2 = cv2.resize(processed_img, (grid_w, grid_h))
+    s3 = cv2.resize(hud_final, (grid_w, grid_h))
+    s4 = cv2.resize(lane_assist_output, (grid_w, grid_h))
+
+    y_alert = 80
+    for msg, color in active_alerts:
+        cv2.putText(s1, msg, (15, y_alert), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+        y_alert += 30
+
+    cv2.putText(s1, "RAW INPUT",    (15, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2)
+    cv2.putText(s2, "AI-ENHANCED",  (15, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0),     2)
+    cv2.putText(s3, "HUD",          (15, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,255),   2)
+    cv2.putText(s4, "AI SEGMENT",   (15, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,255),     2)
+
+    dashboard = np.vstack((np.hstack((s1, s2)), np.hstack((s3, s4))))
+    header = np.zeros((70, dashboard.shape[1], 3), dtype=np.uint8)
+    header_color = (0, 0, 255) if active_alerts else (0, 255, 0)
+    info_str = f"SYSTEM: {status_mode} | Process Time: {int((time.time() - start_time)*1000)}ms | Visibility: {v_score:.1f}%"
+    cv2.putText(header, info_str, (25, 45), cv2.FONT_HERSHEY_SIMPLEX, 0.8, header_color, 2)
+
+    final_display = cv2.resize(np.vstack((header, dashboard)), (1280, 720))
+    ret2, buffer = cv2.imencode('.jpg', final_display, [cv2.IMWRITE_JPEG_QUALITY, 80])
+    
+    return Response(content=buffer.tobytes(), media_type="image/jpeg")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
